@@ -68,7 +68,51 @@ struct Caregiver: Identifiable, Codable, Equatable {
     var name: String
     var email: String
     var phone: String
+    /// User-pickable emoji shown next to the caregiver name in pickers and
+    /// shift cards so each helper is visually distinct at a glance. Empty
+    /// string means "no icon"; older persisted data without this field
+    /// decodes safely thanks to `decodeIfPresent` below.
+    var icon: String = ""
     var availability: [CareWindow] = []
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, email, phone, icon, availability
+    }
+
+    init(id: UUID = UUID(),
+         name: String,
+         email: String,
+         phone: String,
+         icon: String = "",
+         availability: [CareWindow] = []) {
+        self.id = id
+        self.name = name
+        self.email = email
+        self.phone = phone
+        self.icon = icon
+        self.availability = availability
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        self.name = try c.decode(String.self, forKey: .name)
+        self.email = try c.decodeIfPresent(String.self, forKey: .email) ?? ""
+        self.phone = try c.decodeIfPresent(String.self, forKey: .phone) ?? ""
+        self.icon = try c.decodeIfPresent(String.self, forKey: .icon) ?? ""
+        self.availability = try c.decodeIfPresent([CareWindow].self, forKey: .availability) ?? []
+    }
+}
+
+/// Curated set of caregiver emojis used in the icon picker. Kept short so
+/// the picker stays scannable, but covers the most common archetypes.
+enum CaregiverIconPalette {
+    static let options: [String] = [
+        "👩‍⚕️", "👨‍⚕️", "🧑‍⚕️", "👵", "👴",
+        "👩", "👨", "🧑", "👧", "👦",
+        "🤱", "🧕", "👮", "🦸", "🐶",
+        "❤️", "⭐️", "🌸", "🌟", "🩺",
+    ]
 }
 
 final class CareScheduleManager: ObservableObject {
@@ -291,10 +335,12 @@ final class CareScheduleManager: ObservableObject {
         [
             Caregiver(name: "印尼看護",
                       email: "secdcs01@ctshkpcc.edu.hk",
-                      phone: "+852 98765430"),
+                      phone: "+852 98765430",
+                      icon: "🧕"),
             Caregiver(name: "大兒子",
                       email: "secdcs02@ctshkpcc.edu.hk",
-                      phone: "+852 98765431"),
+                      phone: "+852 98765431",
+                      icon: "👨"),
         ]
     }
 
@@ -510,6 +556,17 @@ final class CareScheduleManager: ObservableObject {
             }
         }
         return dates
+    }
+
+    /// True when the given date has at least one shift and every shift on
+    /// that date is `.completed`. Used by the calendar to draw a tick mark
+    /// on fully wrapped-up days so the user can see at a glance which
+    /// previous days are "done".
+    func allShiftsCompleted(on date: Date) -> Bool {
+        let calendar = Calendar.current
+        let dayShifts = shifts.filter { calendar.isDate($0.start, inSameDayAs: date) }
+        guard !dayShifts.isEmpty else { return false }
+        return dayShifts.allSatisfy { $0.status == .completed }
     }
 
     func hasSchedule(on date: Date) -> Bool {

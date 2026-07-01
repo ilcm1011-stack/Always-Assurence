@@ -15,6 +15,14 @@ struct ThermometerView: View {
     @State private var saveMessage = ""
     @State private var showAlert = false
     @State private var lastAutoThermometerUpload: Date? = nil
+    @State private var alerter = VitalAlerter()
+
+    /// Status of the current reading vs. clinical reference range.
+    /// Drives the inline warning icon, value color, and audio alert.
+    private var tempStatus: VitalStatus {
+        VitalRanges.status(ble.iredDeviceData.thermometerData.data.temperature,
+                           in: VitalRanges.temperatureC)
+    }
 
     var body: some View {
         VStack(spacing: 30) {
@@ -28,9 +36,12 @@ struct ThermometerView: View {
                     .font(settings.scaledFont(18, weight: .semibold))
 
                 if let temperature = ble.iredDeviceData.thermometerData.data.temperature {
-                    Text("\(temperature, specifier: "%.1f")\(settings.localized("unit.celsius"))")
-                        .font(settings.scaledFont(22, weight: .semibold))
-                        .foregroundColor(temperatureWarningColor)
+                    HStack(spacing: 6) {
+                        Text("\(temperature, specifier: "%.1f")\(settings.localized("unit.celsius"))")
+                            .font(settings.scaledFont(22, weight: .semibold))
+                            .foregroundColor(temperatureWarningColor)
+                        VitalWarningIcon(status: tempStatus, size: 18)
+                    }
                 } else {
                     Text("--.-\(settings.localized("unit.celsius"))")
                         .font(settings.scaledFont(22, weight: .semibold))
@@ -147,6 +158,12 @@ struct ThermometerView: View {
                 autoSaveThermometerDataIfNeeded()
             }
         }
+        // Beep + vibrate the first time a new reading lands outside
+        // the reference range. The alerter itself debounces so we
+        // don't replay while the value stays abnormal.
+        .onChange(of: ble.iredDeviceData.thermometerData.data.temperature) { _, _ in
+            alerter.evaluate(tempStatus)
+        }
         .alert(isPresented: $showAlert) {
             Alert(
                 title: Text(settings.localized("device.saveResult")),
@@ -180,11 +197,10 @@ struct ThermometerView: View {
     }
 
     private var temperatureWarningColor: Color {
-        if let temperature = ble.iredDeviceData.thermometerData.data.temperature,
-           (temperature > 37.2 || temperature < 36.0) {
-            return .red
-        }
-        return .primary
+        // Use the shared VitalRanges thresholds (36.0–37.5 °C) so
+        // the value color, inline warning icon, and chart guide
+        // lines all agree on what counts as abnormal.
+        tempStatus.isAbnormal ? tempStatus.tint : .primary
     }
 
     private func saveThermometerData() {

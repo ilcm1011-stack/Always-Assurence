@@ -24,7 +24,32 @@ struct BloodPressureDataChartView: View {
             } else {
                 AlwaysVisibleScrollView {
                     VStack(spacing: 20) {
-                        bloodPressureChartView
+                        // Per request: 3 separate charts (Systolic /
+                        // Diastolic / Pulse) so each metric gets its
+                        // own y-axis range and a less busy plot area.
+                        singleSeriesChart(
+                            title: settings.localized("device.systolic"),
+                            color: .red,
+                            unit: "mmHg",
+                            range: VitalRanges.systolicMmHg,
+                            value: { Double($0.systolic) }
+                        )
+
+                        singleSeriesChart(
+                            title: settings.localized("device.diastolic"),
+                            color: .orange,
+                            unit: "mmHg",
+                            range: VitalRanges.diastolicMmHg,
+                            value: { Double($0.diastolic) }
+                        )
+
+                        singleSeriesChart(
+                            title: settings.localized("device.pulse"),
+                            color: .blue,
+                            unit: "bpm",
+                            range: VitalRanges.pulseBpm,
+                            value: { Double($0.pulseRate) }
+                        )
                     }
                     .padding()
                 }
@@ -37,39 +62,57 @@ struct BloodPressureDataChartView: View {
         }
     }
 
-    private var bloodPressureChartView: some View {
+    /// Generic single-series chart used for Systolic / Diastolic / Pulse.
+    /// Pulling each metric out into its own chart prevents the pulse
+    /// series (~60-100 bpm) from compressing the systolic/diastolic
+    /// y-axis range, which made trends hard to read.
+    private func singleSeriesChart(
+        title: String,
+        color: Color,
+        unit: String,
+        range: VitalRanges.Range,
+        value: @escaping (BloodPressureReading) -> Double
+    ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(settings.localized("chart.bloodPressureHistory"))
+            Text(title)
                 .font(settings.scaledFont(18, weight: .semibold))
-            
-            Chart(bloodPressureData) { reading in
-                LineMark(
-                    x: .value(settings.localized("chart.time"), reading.time),
-                    y: .value(settings.localized("device.systolic"), reading.systolic)
-                )
-                .foregroundStyle(by: .value(settings.localized("common.type"), settings.localized("device.systolic")))
-                .symbol(.circle)
-                
-                LineMark(
-                    x: .value(settings.localized("chart.time"), reading.time),
-                    y: .value(settings.localized("device.diastolic"), reading.diastolic)
-                )
-                .foregroundStyle(by: .value(settings.localized("common.type"), settings.localized("device.diastolic")))
-                .symbol(.square)
-                
-                LineMark(
-                    x: .value(settings.localized("chart.time"), reading.time),
-                    y: .value(settings.localized("device.pulse"), reading.pulseRate)
-                )
-                .foregroundStyle(by: .value(settings.localized("common.type"), settings.localized("device.pulse")))
-                .symbol(.triangle)
+
+            Chart {
+                ForEach(bloodPressureData) { reading in
+                    LineMark(
+                        x: .value(settings.localized("chart.time"), reading.time),
+                        y: .value(title, value(reading))
+                    )
+                    .foregroundStyle(color)
+                    .interpolationMethod(.catmullRom)
+
+                    PointMark(
+                        x: .value(settings.localized("chart.time"), reading.time),
+                        y: .value(title, value(reading))
+                    )
+                    .foregroundStyle(color)
+                    .symbolSize(50)
+                }
+
+                // Reference range guide lines (low / high horizontal rules).
+                RuleMark(y: .value("Low",  range.low))
+                    .foregroundStyle(VitalStatus.low.tint.opacity(0.6))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                    .annotation(position: .topTrailing, alignment: .trailing) {
+                        Text("\(Int(range.low)) \(unit)")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(VitalStatus.low.tint)
+                    }
+                RuleMark(y: .value("High", range.high))
+                    .foregroundStyle(VitalStatus.high.tint.opacity(0.6))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                    .annotation(position: .topTrailing, alignment: .trailing) {
+                        Text("\(Int(range.high)) \(unit)")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(VitalStatus.high.tint)
+                    }
             }
             .frame(height: 200)
-            .chartForegroundStyleScale([
-                settings.localized("device.systolic"): .red,
-                settings.localized("device.diastolic"): .orange,
-                settings.localized("device.pulse"): .blue
-            ])
             .chartXAxis {
                 AxisMarks(values: .automatic(desiredCount: 6)) { value in
                     AxisGridLine()
@@ -78,12 +121,17 @@ struct BloodPressureDataChartView: View {
                 }
             }
             .chartYAxis {
-                AxisMarks { _ in
+                AxisMarks(position: .leading) { value in
                     AxisGridLine()
-                    AxisValueLabel()
+                    AxisTick()
+                    AxisValueLabel {
+                        if let v = value.as(Double.self) {
+                            Text("\(Int(v)) \(unit)")
+                                .font(settings.scaledFont(12))
+                        }
+                    }
                 }
             }
-            .chartLegend(position: .bottom)
         }
         .padding()
         .background(Color.gray.opacity(0.1))

@@ -32,8 +32,11 @@ struct OximeterDataChartView: View {
             } else {
                 AlwaysVisibleScrollView {
                     VStack(spacing: 20) {
+                        // ── SpO2 chart (heart rate now lives in its own
+                        //    chart below — keeps the y-axis ranges sane
+                        //    so SpO2's narrow 90-100% band is readable).
                         VStack(alignment: .leading, spacing: 10) {
-                            Text(settings.localized("chart.spO2HeartRate"))
+                            Text(settings.localized("common.spO2"))
                                 .font(settings.scaledFont(18, weight: .semibold))
                                 .padding(.horizontal)
                                 .padding(.top, 10)
@@ -47,7 +50,45 @@ struct OximeterDataChartView: View {
                                     .foregroundStyle(.blue)
                                     .interpolationMethod(.catmullRom)
                                     .symbol(by: .value(settings.localized("common.type"), settings.localized("common.spO2")))
+                                }
 
+                                // Reference range guide lines.
+                                RuleMark(y: .value("Low",  VitalRanges.spO2Percent.low))
+                                    .foregroundStyle(VitalStatus.low.tint.opacity(0.6))
+                                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                                    .annotation(position: .topTrailing, alignment: .trailing) {
+                                        Text("≥ \(Int(VitalRanges.spO2Percent.low))%")
+                                            .font(.system(size: 10, weight: .medium))
+                                            .foregroundColor(VitalStatus.low.tint)
+                                    }
+                            }
+                            .chartForegroundStyleScale([
+                                settings.localized("common.spO2"): .blue
+                            ])
+                            .frame(height: 250)
+                            .chartYAxisLabel("%", position: .leading)
+                            .chartXAxis {
+                                AxisMarks(values: .automatic(desiredCount: 6)) { value in
+                                    AxisGridLine()
+                                    AxisTick()
+                                    AxisValueLabel(format: .dateTime.month().day().hour().minute())
+                                }
+                            }
+                            .padding(.horizontal)
+                            .padding(.bottom, 10)
+                        }
+                        .background(Color(.systemGray6))
+                        .cornerRadius(12)
+
+                        // ── Heart Rate chart (separated per request).
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(settings.localized("common.heartRate"))
+                                .font(settings.scaledFont(18, weight: .semibold))
+                                .padding(.horizontal)
+                                .padding(.top, 10)
+
+                            Chart {
+                                ForEach(dataPoints) { dataPoint in
                                     LineMark(
                                         x: .value(settings.localized("chart.time"), dataPoint.time),
                                         y: .value(settings.localized("common.heartRate"), dataPoint.heartRate)
@@ -56,13 +97,30 @@ struct OximeterDataChartView: View {
                                     .interpolationMethod(.catmullRom)
                                     .symbol(by: .value(settings.localized("common.type"), settings.localized("common.heartRate")))
                                 }
+
+                                // Reference range guide lines.
+                                RuleMark(y: .value("Low",  VitalRanges.pulseBpm.low))
+                                    .foregroundStyle(VitalStatus.low.tint.opacity(0.6))
+                                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                                    .annotation(position: .topTrailing, alignment: .trailing) {
+                                        Text("\(Int(VitalRanges.pulseBpm.low)) bpm")
+                                            .font(.system(size: 10, weight: .medium))
+                                            .foregroundColor(VitalStatus.low.tint)
+                                    }
+                                RuleMark(y: .value("High", VitalRanges.pulseBpm.high))
+                                    .foregroundStyle(VitalStatus.high.tint.opacity(0.6))
+                                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                                    .annotation(position: .topTrailing, alignment: .trailing) {
+                                        Text("\(Int(VitalRanges.pulseBpm.high)) bpm")
+                                            .font(.system(size: 10, weight: .medium))
+                                            .foregroundColor(VitalStatus.high.tint)
+                                    }
                             }
                             .chartForegroundStyleScale([
-                                settings.localized("common.spO2"): .blue,
                                 settings.localized("common.heartRate"): .red
                             ])
                             .frame(height: 250)
-                            .chartYAxisLabel(settings.localized("common.value"), position: .leading)
+                            .chartYAxisLabel("bpm", position: .leading)
                             .chartXAxis {
                                 AxisMarks(values: .automatic(desiredCount: 6)) { value in
                                     AxisGridLine()

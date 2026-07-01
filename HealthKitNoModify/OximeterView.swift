@@ -15,6 +15,23 @@ struct OximeterView: View {
     @State private var saveMessage = ""
     @State private var showAlert = false
     @State private var lastAutoOximeterUpload: Date? = nil
+    @State private var spo2Alerter = VitalAlerter()
+    @State private var hrAlerter   = VitalAlerter()
+
+    /// Status of SpO₂ against the 95–100 % reference range.
+    private var spo2Status: VitalStatus {
+        guard let spo2 = ble.iredDeviceData.oximeterData.data.spo2 else { return .unknown }
+        return VitalRanges.status(Double(spo2), in: VitalRanges.spO2Percent)
+    }
+
+    /// Status of pulse rate against the 60–100 bpm reference range.
+    /// The oximeter exposes pulse separately from BP, so we evaluate
+    /// it here too and surface a separate warning icon next to the
+    /// heart-rate value.
+    private var pulseStatus: VitalStatus {
+        guard let pulse = ble.iredDeviceData.oximeterData.data.pulse else { return .unknown }
+        return VitalRanges.status(Double(pulse), in: VitalRanges.pulseBpm)
+    }
 
     var body: some View {
         VStack(spacing: 20) {
@@ -101,16 +118,23 @@ struct OximeterView: View {
                     VStack {
                         Text(settings.localized("common.spO2"))
                             .font(settings.scaledFont(16, weight: .semibold))
-                        Text(spo2Text)
-                            .font(settings.scaledFont(16))
-                            .foregroundColor(spo2WarningColor)
+                        HStack(spacing: 4) {
+                            Text(spo2Text)
+                                .font(settings.scaledFont(16))
+                                .foregroundColor(spo2WarningColor)
+                            VitalWarningIcon(status: spo2Status)
+                        }
                     }
 
                     VStack {
                         Text(settings.localized("common.heartRate"))
                             .font(settings.scaledFont(16, weight: .semibold))
-                        Text(heartRateText)
-                            .font(settings.scaledFont(16))
+                        HStack(spacing: 4) {
+                            Text(heartRateText)
+                                .font(settings.scaledFont(16))
+                                .foregroundColor(heartRateWarningColor)
+                            VitalWarningIcon(status: pulseStatus)
+                        }
                     }
                 }
 
@@ -142,6 +166,14 @@ struct OximeterView: View {
             if completed {
                 autoSaveOximeterDataIfNeeded()
             }
+        }
+        // Separate alerters for SpO₂ and pulse so each metric beeps
+        // independently when it first crosses into the abnormal range.
+        .onChange(of: ble.iredDeviceData.oximeterData.data.spo2) { _, _ in
+            spo2Alerter.evaluate(spo2Status)
+        }
+        .onChange(of: ble.iredDeviceData.oximeterData.data.pulse) { _, _ in
+            hrAlerter.evaluate(pulseStatus)
         }
         .alert(isPresented: $showAlert) {
             Alert(
@@ -207,10 +239,8 @@ struct OximeterView: View {
     }
 
     private var spo2WarningColor: Color {
-        if let spo2 = ble.iredDeviceData.oximeterData.data.spo2, spo2 < 95 {
-            return .red
-        }
-        return .primary
+        // Routed through VitalRanges so the threshold lives in one place.
+        spo2Status.isAbnormal ? spo2Status.tint : .primary
     }
 
     private var heartRateText: String {
@@ -219,6 +249,10 @@ struct OximeterView: View {
         } else {
             return "--"
         }
+    }
+
+    private var heartRateWarningColor: Color {
+        pulseStatus.isAbnormal ? pulseStatus.tint : .primary
     }
 
     private var piText: String {

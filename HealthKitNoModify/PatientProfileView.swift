@@ -16,6 +16,8 @@ struct PatientProfileView: View {
     @State private var newCaregiverName = ""
     @State private var newCaregiverEmail = ""
     @State private var newCaregiverPhone = ""
+    @State private var newCaregiverIcon: String = ""
+    @State private var showIconPicker: Bool = false
     @State private var caregiverAvailability: [CareWindow] = []
 
     @State private var latestChartTemperature: Double?
@@ -24,6 +26,17 @@ struct PatientProfileView: View {
     @State private var latestChartDiastolic: Double?
 
     private let genderOptions = ["home.gender.female", "home.gender.male", "home.gender.other"]
+
+    /// When true (e.g. when launched from the home-screen "Caregivers"
+    /// tile), the Add-Caregiver sheet opens automatically as soon as the
+    /// view appears. Defaults to false so the existing entry point
+    /// (direct navigation from anywhere else) still lands on the profile
+    /// itself.
+    private let openAddCaregiverOnAppear: Bool
+
+    init(openAddCaregiverOnAppear: Bool = false) {
+        self.openAddCaregiverOnAppear = openAddCaregiverOnAppear
+    }
 
     var body: some View {
         AlwaysVisibleScrollView {
@@ -43,6 +56,23 @@ struct PatientProfileView: View {
         }
         .navigationTitle(settings.localized("home.patientDashboard"))
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            // Honor the deep-link from the home screen caregivers tile.
+            if openAddCaregiverOnAppear && !isAddingCaregiver {
+                // Reset draft fields so the sheet opens clean.
+                newCaregiverName = ""
+                newCaregiverEmail = ""
+                newCaregiverPhone = ""
+                newCaregiverIcon = ""
+                caregiverAvailability = []
+                // Tiny delay so the navigation push animation completes
+                // before the sheet animates in (avoids a visual stutter
+                // on iOS 17).
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    isAddingCaregiver = true
+                }
+            }
+        }
         .sheet(isPresented: $isEditingProfile) {
             NavigationStack {
                 Form {
@@ -110,6 +140,8 @@ struct PatientProfileView: View {
                             .keyboardType(.phonePad)
                             .textContentType(.telephoneNumber)
                             .textFieldStyle(RoundedBorderTextFieldStyle())
+
+                        caregiverIconRow
                     }
 
                     Section(header: Text(settings.localized("home.caregiverAvailability"))) {
@@ -168,6 +200,9 @@ struct PatientProfileView: View {
                         .disabled(newCaregiverName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }
+                .sheet(isPresented: $showIconPicker) {
+                    caregiverIconPickerSheet
+                }
             }
         }
         .sheet(item: $editingCaregiver) { caregiver in
@@ -184,6 +219,8 @@ struct PatientProfileView: View {
                             .keyboardType(.phonePad)
                             .textContentType(.telephoneNumber)
                             .textFieldStyle(RoundedBorderTextFieldStyle())
+
+                        caregiverIconRow
                     }
 
                     Section(header: Text(settings.localized("home.caregiverAvailability"))) {
@@ -246,7 +283,11 @@ struct PatientProfileView: View {
                     newCaregiverName = caregiver.name
                     newCaregiverEmail = caregiver.email
                     newCaregiverPhone = caregiver.phone
+                    newCaregiverIcon = caregiver.icon
                     caregiverAvailability = caregiver.availability
+                }
+                .sheet(isPresented: $showIconPicker) {
+                    caregiverIconPickerSheet
                 }
             }
         }
@@ -479,6 +520,7 @@ struct PatientProfileView: View {
                     newCaregiverName = ""
                     newCaregiverEmail = ""
                     newCaregiverPhone = ""
+                    newCaregiverIcon = ""
                     caregiverAvailability = []
                     isAddingCaregiver = true
                 }) {
@@ -494,8 +536,14 @@ struct PatientProfileView: View {
                 ForEach(scheduleManager.caregivers) { caregiver in
                     VStack(alignment: .leading, spacing: 10) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(caregiver.name)
-                                .font(settings.scaledFont(16, weight: .semibold))
+                            HStack(spacing: 8) {
+                                if !caregiver.icon.isEmpty {
+                                    Text(caregiver.icon)
+                                        .font(settings.scaledFont(22))
+                                }
+                                Text(caregiver.name)
+                                    .font(settings.scaledFont(16, weight: .semibold))
+                            }
                             if !caregiver.email.isEmpty {
                                 Text("Email：\(caregiver.email)")
                                     .font(settings.scaledFont(13))
@@ -514,6 +562,7 @@ struct PatientProfileView: View {
                                 newCaregiverName = caregiver.name
                                 newCaregiverEmail = caregiver.email
                                 newCaregiverPhone = caregiver.phone
+                                newCaregiverIcon = caregiver.icon
                             }
                             .font(settings.scaledFont(14, weight: .semibold))
                             Button(settings.localized("schedule.delete")) {
@@ -539,10 +588,12 @@ struct PatientProfileView: View {
         let newCaregiver = Caregiver(name: newCaregiverName.trimmingCharacters(in: .whitespacesAndNewlines),
                                      email: newCaregiverEmail.trimmingCharacters(in: .whitespacesAndNewlines),
                                      phone: newCaregiverPhone.trimmingCharacters(in: .whitespacesAndNewlines),
+                                     icon: newCaregiverIcon,
                                      availability: caregiverAvailability)
         scheduleManager.addCaregiver(newCaregiver)
         isAddingCaregiver = false
         caregiverAvailability = []
+        newCaregiverIcon = ""
     }
 
     private func addCaregiverAvailabilityWindow() {
@@ -565,10 +616,12 @@ struct PatientProfileView: View {
         caregiver.name = newCaregiverName.trimmingCharacters(in: .whitespacesAndNewlines)
         caregiver.email = newCaregiverEmail.trimmingCharacters(in: .whitespacesAndNewlines)
         caregiver.phone = newCaregiverPhone.trimmingCharacters(in: .whitespacesAndNewlines)
+        caregiver.icon = newCaregiverIcon
         caregiver.availability = caregiverAvailability
         scheduleManager.updateCaregiver(caregiver)
         editingCaregiver = nil
         caregiverAvailability = []
+        newCaregiverIcon = ""
     }
 
     private func anomalyBanner(message: String) -> some View {
@@ -847,6 +900,107 @@ struct PatientProfileView: View {
             return Double(stringValue)
         }
         return nil
+    }
+
+    /// Inline row that lives in both the Add and Edit caregiver Forms.
+    /// Tapping opens a dedicated full-screen sheet for picking the emoji,
+    /// keeping the picker grid outside of any `List`/`Form` so tap targets
+    /// stay reliable on iPhone & iPad.
+    private var caregiverIconRow: some View {
+        Button(action: { showIconPicker = true }) {
+            HStack {
+                Text(settings.localized("schedule.caregiverIconLabel"))
+                    .font(settings.scaledFont(15, weight: .semibold))
+                    .foregroundColor(.primary)
+                Spacer()
+                if newCaregiverIcon.isEmpty {
+                    Text(settings.localized("schedule.caregiverIconNone"))
+                        .font(settings.scaledFont(13))
+                        .foregroundColor(.secondary)
+                } else {
+                    Text(newCaregiverIcon)
+                        .font(.system(size: 28))
+                }
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .contentShape(Rectangle())
+            .padding(.vertical, 6)
+        }
+        .buttonStyle(BorderlessButtonStyle())
+    }
+
+    private var caregiverIconPickerSheet: some View {
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text(settings.localized("schedule.caregiverIconLabel"))
+                        .font(settings.scaledFont(18, weight: .semibold))
+
+                    Button(action: {
+                        newCaregiverIcon = ""
+                        showIconPicker = false
+                    }) {
+                        HStack {
+                            Image(systemName: "xmark.circle")
+                                .foregroundColor(.red)
+                                .font(.title2)
+                            Text(settings.localized("schedule.caregiverIconClear"))
+                                .font(settings.scaledFont(15, weight: .semibold))
+                                .foregroundColor(.primary)
+                            Spacer()
+                            if newCaregiverIcon.isEmpty {
+                                Image(systemName: "checkmark")
+                                    .foregroundColor(.accentColor)
+                            }
+                        }
+                        .padding(12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(Color(.tertiarySystemBackground))
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 5),
+                              spacing: 12) {
+                        ForEach(CaregiverIconPalette.options, id: \.self) { emoji in
+                            Button(action: {
+                                newCaregiverIcon = emoji
+                                showIconPicker = false
+                            }) {
+                                Text(emoji)
+                                    .font(.system(size: 36))
+                                    .frame(maxWidth: .infinity, minHeight: 64)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .fill(newCaregiverIcon == emoji
+                                                  ? Color(.systemBlue).opacity(0.22)
+                                                  : Color(.tertiarySystemBackground))
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .stroke(newCaregiverIcon == emoji ? Color(.systemBlue) : Color(.separator),
+                                                    lineWidth: newCaregiverIcon == emoji ? 2.5 : 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle(settings.localized("schedule.caregiverIconLabel"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(settings.localized("schedule.close")) {
+                        showIconPicker = false
+                    }
+                }
+            }
+        }
     }
 
     private func saveProfile() {

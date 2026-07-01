@@ -51,6 +51,34 @@ struct ScheduleCalendarView: View {
                     }
                 }
 
+                // Prominent "selected date" banner so the user always sees
+                // which day the lists below are tied to.
+                HStack(spacing: 8) {
+                    Image(systemName: "calendar")
+                        .foregroundColor(.accentColor)
+                    Text(settings.localized("schedule.selectedDateLabel"))
+                        .font(elderCaptionFont)
+                        .foregroundColor(.secondary)
+                    Text(formatLongDate(selectedDate))
+                        .font(settings.scaledFont(17, weight: .semibold))
+                        .foregroundColor(.primary)
+                    if Calendar.current.isDate(selectedDate, inSameDayAs: Date()) {
+                        Text(settings.localized("schedule.todayBadge"))
+                            .font(settings.scaledFont(12, weight: .bold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.accentColor.opacity(0.18))
+                            .foregroundColor(.accentColor)
+                            .cornerRadius(8)
+                    }
+                    Spacer()
+                }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color(.tertiarySystemBackground))
+                )
+
                 // Weekly overbooked reminders (top-right)
                 HStack {
                     Spacer()
@@ -107,31 +135,79 @@ struct ScheduleCalendarView: View {
                         let date = Calendar.current.date(byAdding: .day, value: day - 1, to: startOfMonth) ?? startOfMonth
                         let today = Calendar.current.startOfDay(for: Date())
                         let isPastDate = date < today
+                        let isToday = Calendar.current.isDate(date, inSameDayAs: Date())
+                        // Past days never raise the red "problematic" flag —
+                        // they're history, not actionable.
                         let isProblematic = !isPastDate && scheduleManager.checkDateHasIssue(date)
                         let isSelected = Calendar.current.isDate(date, inSameDayAs: selectedDate)
+                        // Tick mark when every shift on that day is completed —
+                        // gives the user a positive "done" signal for past
+                        // (and current) days where care actually wrapped up.
+                        let isAllDone = scheduleManager.allShiftsCompleted(on: date)
                         Button(action: {
-                            guard !isPastDate else { return }
+                            // Past dates are now selectable so the user can
+                            // review history; only future-creation behaviour
+                            // (setting `startDate` / `endDate` to that day at
+                            // 8am) is skipped for past picks.
                             selectedDate = date
                             onDateSelected()
 
-                            let calendar = Calendar.current
-                            if let newStart = calendar.date(bySettingHour: 8, minute: 0, second: 0, of: date) {
-                                startDate = newStart
-                                endDate = calendar.date(byAdding: .hour, value: 6, to: newStart) ?? newStart
-                            } else {
-                                startDate = date
-                                endDate = calendar.date(byAdding: .hour, value: 6, to: date) ?? date
+                            if !isPastDate {
+                                let calendar = Calendar.current
+                                if let newStart = calendar.date(bySettingHour: 8, minute: 0, second: 0, of: date) {
+                                    startDate = newStart
+                                    endDate = calendar.date(byAdding: .hour, value: 6, to: newStart) ?? newStart
+                                } else {
+                                    startDate = date
+                                    endDate = calendar.date(byAdding: .hour, value: 6, to: date) ?? date
+                                }
                             }
                         }) {
-                            Text("\(day)")
-                                .font(elderBodyFont)
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 44)
-                                .background(isProblematic ? Color(.systemRed).opacity(0.7) : (isSelected ? Color(.systemBlue).opacity(0.2) : Color.clear))
-                                .foregroundColor(!isPastDate ? (isProblematic ? .white : .primary) : .secondary)
-                                .cornerRadius(8)
+                            ZStack(alignment: .topTrailing) {
+                                Text("\(day)")
+                                    .font(elderBodyFont)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 44)
+                                    .background(
+                                        Group {
+                                            if isProblematic {
+                                                Color(.systemRed).opacity(0.7)
+                                            } else if isSelected {
+                                                Color(.systemBlue).opacity(0.25)
+                                            } else if isToday {
+                                                Color(.systemBlue).opacity(0.08)
+                                            } else {
+                                                Color.clear
+                                            }
+                                        }
+                                    )
+                                    .foregroundColor(
+                                        isProblematic ? .white :
+                                        (isPastDate ? .secondary : .primary)
+                                    )
+                                    .cornerRadius(8)
+                                    .overlay(
+                                        // Strong ring on the selected cell so
+                                        // the current pick is obvious even at
+                                        // a glance.
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(isSelected ? Color(.systemBlue) : Color.clear,
+                                                    lineWidth: 2.5)
+                                    )
+
+                                if isAllDone {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 14, weight: .bold))
+                                        .foregroundColor(.green)
+                                        .background(
+                                            Circle()
+                                                .fill(Color(.systemBackground))
+                                                .frame(width: 14, height: 14)
+                                        )
+                                        .padding(2)
+                                }
+                            }
                         }
-                        .disabled(isPastDate)
                     }
                 }
             }
@@ -244,10 +320,31 @@ struct ScheduleCalendarView: View {
     // MARK: - Local helpers (kept private; mirror the parent's formatters
     // so this view is fully self-contained and can be edited independently).
 
+    /// Maps the user's chosen `AppLanguage` to a matching `Locale`, so all
+    /// date strings shown by the calendar follow the in-app language
+    /// instead of the device system language.
+    private var currentLocale: Locale {
+        switch settings.language {
+        case .chinese:    return Locale(identifier: "zh_TW")
+        case .english:    return Locale(identifier: "en_US")
+        case .indonesian: return Locale(identifier: "id_ID")
+        }
+    }
+
     private func formatMonthYear(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMMM yyyy"
-        formatter.locale = Locale(identifier: "zh_TW")
+        formatter.locale = currentLocale
+        return formatter.string(from: date)
+    }
+
+    /// Long-form "Mon, 23 Jun 2026" style label used in the "selected date"
+    /// banner above the calendar grid. Follows the in-app language.
+    private func formatLongDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .full
+        formatter.timeStyle = .none
+        formatter.locale = currentLocale
         return formatter.string(from: date)
     }
 

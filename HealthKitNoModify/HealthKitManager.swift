@@ -16,6 +16,20 @@ class HealthKitManager: ObservableObject {
     @Published private var localMeasurements: [String: DailyVitals] = [:]
     @Published var uploadState: UploadState = .idle
 
+    /// True until we positively detect that the app is missing the
+    /// `com.apple.developer.healthkit` entitlement. When the entitlement is
+    /// missing, every HealthKit API call returns
+    /// `Error Domain=com.apple.healthkit Code=4` and Apple's framework
+    /// spams the console with "Failed to determine authorization status"
+    /// for each call. Flipping this flag off makes the rest of the manager
+    /// skip every HK call so the spam stops and the app stays usable
+    /// (vital signs simply remain `nil` instead of crashing).
+    ///
+    /// Re-enable HealthKit by adding the HealthKit capability in Xcode
+    /// (Target → Signing & Capabilities → + Capability → HealthKit).
+    @Published private(set) var hasHealthKitEntitlement: Bool = true
+    private var didProbeEntitlement: Bool = false
+
     enum MeasurementType: String {
         case temperature
         case spo2
@@ -35,10 +49,76 @@ class HealthKitManager: ObservableObject {
 
     private init() {
         loadPersistedMeasurements()
-        // Guard against missing HealthKit authorization - defer status check
+        // Probe the HealthKit entitlement exactly once before doing any
+        // real HK work. The probe call may itself log one error if the
+        // entitlement is missing, but every subsequent call will be
+        // skipped, which stops the repeating console spam.
         DispatchQueue.main.async { [weak self] in
-            self?.updateAuthorizationStatus()
+            self?.probeEntitlementThenUpdateStatus()
         }
+    }
+
+    /// Single HealthKit probe to find out whether the app has the
+    /// `com.apple.developer.healthkit` entitlement. On the failure path
+    /// we mark `hasHealthKitEntitlement = false` and bail out of every
+    /// other HK API call from then on.
+    ///
+    /// **Why we don't call `requestAuthorization` here:**
+    /// When the HealthKit entitlement is missing, `requestAuthorization`
+    /// throws an *Objective-C* NSException that cannot be caught in
+    /// Swift — the app crashes before the completion handler runs.
+    /// Instead we use a lightweight `HKSampleQuery` — its completion
+    /// handler receives a normal `NSError` (domain "com.apple.healthkit",
+    /// code 4 or 5) that we *can* inspect safely.
+    private func probeEntitlementThenUpdateStatus() {
+        guard !didProbeEntitlement else {
+            updateAuthorizationStatus()
+            return
+        }
+        didProbeEntitlement = true
+
+        guard HKHealthStore.isHealthDataAvailable() else {
+            hasHealthKitEntitlement = false
+            authorizationStatus = .notDetermined
+            return
+        }
+
+        // Pick any known quantity type for the probe query.
+        guard let probeType = HKQuantityType.quantityType(forIdentifier: .bodyTemperature) else {
+            hasHealthKitEntitlement = false
+            authorizationStatus = .notDetermined
+            return
+        }
+
+        // A single-sample query is lightweight and — crucially — does
+        // NOT throw an NSException when the entitlement is missing.
+        // The error arrives in the completion handler where we can
+        // handle it safely.
+        let query = HKSampleQuery(
+            sampleType: probeType,
+            predicate: nil,
+            limit: 1,
+            sortDescriptors: nil
+        ) { [weak self] _, _, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if let nsError = error as NSError?,
+                   nsError.domain == "com.apple.healthkit" {
+                    // Missing entitlement — disable HealthKit globally
+                    // for this session so we don't keep hammering the
+                    // framework.
+                    self.hasHealthKitEntitlement = false
+                    self.authorizationStatus = .notDetermined
+                    self.errorMessage = "HealthKit capability is not enabled for this app. Open Xcode → Target → Signing & Capabilities → + Capability → HealthKit to enable it."
+                    NSLog("[HealthKitManager] Missing com.apple.developer.healthkit entitlement; HealthKit calls disabled for this session.")
+                    return
+                }
+                // Entitlement is present — do the normal per-type
+                // status read.
+                self.updateAuthorizationStatus()
+            }
+        }
+        healthStore.execute(query)
     }
 
     private func populatePublishedFromPersisted() {
@@ -61,6 +141,36 @@ class HealthKitManager: ObservableObject {
     // Notification for when a measurement is recorded
     static let didRecordMeasurementNotification = Notification.Name("HealthKitManagerDidRecordMeasurement")
 
+    /// Seeds demo "out of range" vitals for the default patient (晨婆)
+    /// so caregivers immediately see the colour-coded warnings + "Check
+    /// Now" pill on first launch.
+    ///
+    /// • Low temperature:   35.6°C (below the 36.0 lower bound)
+    /// • Normal SpO₂:       97% (within 95–100)
+    /// • High blood pressure: 145 / 95 (above 120 / 80 caps)
+    ///
+    /// Only applied when:
+    ///   1. The patient name matches the seed name, AND
+    ///   2. No real measurement has been recorded yet — so as soon as a
+    ///      real BLE / HealthKit reading arrives the demo values are
+    ///      silently replaced.
+    func seedDemoDefaultsIfNeeded(patientName: String) {
+        guard patientName == "晨婆" else { return }
+        guard localMeasurements.isEmpty else { return }
+        guard temperature == nil,
+              oxygenSaturation == nil,
+              systolicPressure == nil,
+              diastolicPressure == nil else { return }
+
+        DispatchQueue.main.async {
+            self.temperature       = 35.6   // low
+            self.oxygenSaturation  = 0.97   // normal (stored as fraction)
+            self.systolicPressure  = 145    // high
+            self.diastolicPressure = 95     // high
+            self.evaluateAnomalies()
+        }
+    }
+
     struct DailyVitals: Codable {
         let temperature: Double?
         let oxygenSaturation: Double?
@@ -70,6 +180,15 @@ class HealthKitManager: ObservableObject {
     }
 
     func updateAuthorizationStatus() {
+        // Skip if we already know the entitlement is missing — calling
+        // `authorizationStatus(for:)` per type without the entitlement is
+        // exactly what produces the repeating console spam.
+        guard hasHealthKitEntitlement else {
+            DispatchQueue.main.async {
+                self.authorizationStatus = .notDetermined
+            }
+            return
+        }
         guard HKHealthStore.isHealthDataAvailable() else {
             DispatchQueue.main.async {
                 self.authorizationStatus = .notDetermined
@@ -97,6 +216,11 @@ class HealthKitManager: ObservableObject {
     }
 
     func requestAuthorization(completion: @escaping (Bool) -> Void) {
+        guard hasHealthKitEntitlement else {
+            errorMessage = "HealthKit capability is not enabled for this app. Enable it in Xcode → Target → Signing & Capabilities → + Capability → HealthKit."
+            completion(false)
+            return
+        }
         guard HKHealthStore.isHealthDataAvailable() else {
             errorMessage = "此裝置不支援 HealthKit。"
             completion(false)
@@ -107,6 +231,13 @@ class HealthKitManager: ObservableObject {
         healthStore.requestAuthorization(toShare: nil, read: readTypes) { [weak self] success, error in
             DispatchQueue.main.async {
                 self?.updateAuthorizationStatus()
+                if let nsError = error as NSError?,
+                   nsError.domain == "com.apple.healthkit",
+                   nsError.code == 4 {
+                    // Entitlement was revoked between probe and now — flip
+                    // the flag and stop further calls.
+                    self?.hasHealthKitEntitlement = false
+                }
                 if let error = error {
                     self?.errorMessage = error.localizedDescription
                 }
@@ -239,6 +370,9 @@ class HealthKitManager: ObservableObject {
     }
 
     func refreshLatestMeasurements(saveAndUpload: Bool = false) {
+        // No entitlement → don't touch HealthKit at all. Cached / Bluetooth
+        // measurements already shown via `recordMeasurements` remain valid.
+        guard hasHealthKitEntitlement else { return }
         guard HKHealthStore.isHealthDataAvailable() else {
             return
         }
@@ -295,6 +429,10 @@ class HealthKitManager: ObservableObject {
     }
 
     func fetchMeasurements(for date: Date, completion: @escaping (Double?, Double?, Double?, Double?) -> Void) {
+        guard hasHealthKitEntitlement else {
+            completion(nil, nil, nil, nil)
+            return
+        }
         guard HKHealthStore.isHealthDataAvailable() else {
             completion(nil, nil, nil, nil)
             return

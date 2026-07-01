@@ -17,23 +17,76 @@ struct HandoffNote: Identifiable, Codable {
 
 struct HandoffView: View {
     @EnvironmentObject private var settings: AppSettings
+    @ObservedObject private var scheduleManager = CareScheduleManager.shared
+
     @State private var notes: [HandoffNote] = []
     @State private var originalText: String = ""
     @State private var translatedText: String = ""
-    @State private var targetLanguage = "印尼文"
-    @State private var detectedSourceLanguage = "自動偵測"
+
+    /// User-selected source language. Auto-detect was removed by request —
+    /// the user now always explicitly picks the source language. Default is
+    /// English so a Western caregiver can immediately type a note and see
+    /// the Chinese translation appear in the preview.
+    @State private var originalLanguage: String = "英文"
+    @State private var targetLanguage: String = "中文"
+
+    /// Last detected source language label — still computed by the speech
+    /// recognizer path so we can display it as a hint, but no longer used
+    /// to drive translation routing now that the picker is explicit.
+    @State private var detectedSourceLanguage = ""
+
+    /// Recipient caregiver for this translated note (optional). Nil means
+    /// the note isn't assigned to any caregiver yet.
+    @State private var assignedCaregiverId: UUID? = nil
+
     @State private var isRecording = false
     @State private var isTranslating = false
     @State private var translationError: String?
     @StateObject private var recognizer = SpeechRecognizer()
 
+    /// Debounce token: every keystroke writes the current time into
+    /// `typingToken`; the dispatched translation only fires if `typingToken`
+    /// hasn't moved in `typingDebounceSeconds`. Keeps live translation
+    /// responsive without firing one API call per character.
+    @State private var typingToken: UUID = UUID()
+    private let typingDebounceSeconds: Double = 0.45
+
+    /// Cache the last-translated input so we don't re-translate the same
+    /// text twice (saves a round trip every time SwiftUI re-runs `onChange`).
+    @State private var lastTranslatedInput: String = ""
+
     private let languages = ["印尼文", "英文", "中文"]
+    // Auto-detect removed — the user explicitly selects the source language.
+    private let originalLanguages = ["英文", "中文", "印尼文"]
+
+    private var assignedCaregiver: Caregiver? {
+        guard let id = assignedCaregiverId else { return nil }
+        return scheduleManager.caregivers.first { $0.id == id }
+    }
 
     var body: some View {
         AlwaysVisibleScrollView {
             VStack(spacing: 20) {
+                // Shaded top spacer — pushes the whole translation UI lower
+                // on the page so the navigation bar / safe area visually
+                // separates from the content. Acts as a soft "header band".
+                Rectangle()
+                    .fill(Color(.secondarySystemBackground))
+                    .frame(height: 120)
+                    .frame(maxWidth: .infinity)
+                    .overlay(
+                        LinearGradient(
+                            colors: [Color.black.opacity(0.06), Color.clear],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .padding(.horizontal, -16)
+                    .padding(.top, -16)
+
                 header
                 languageSelector
+                caregiverAssignment
                 messageInput
                 actionButtons
                 translationPreview
@@ -48,8 +101,14 @@ struct HandoffView: View {
             if !newValue.isEmpty {
                 originalText = newValue
                 detectedSourceLanguage = TranslationService.detectSourceLanguageLabel(for: newValue)
-                translateCurrentText()
+                scheduleDebouncedTranslate()
             }
+        }
+        // Live translate-as-you-type: every keystroke schedules a debounced
+        // translation. The actual API call only fires once typing pauses,
+        // so the preview updates "instantly" without a request per letter.
+        .onChange(of: originalText) { _, _ in
+            scheduleDebouncedTranslate()
         }
     }
 
@@ -65,18 +124,75 @@ struct HandoffView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Two stacked language pickers — the user picks BOTH the original
+    /// language and the target language so the translator never has to
+    /// guess. Auto-detect was removed by request; defaults are English →
+    /// Chinese.
     private var languageSelector: some View {
-        HStack(spacing: 16) {
-            Text(settings.localized("handoff.targetLanguage"))
-                .font(settings.scaledFont(16, weight: .semibold))
-            Spacer()
-            Picker(settings.localized("handoff.targetLanguage"), selection: $targetLanguage) {
-                ForEach(languages, id: \.self) { language in
-                    Text(language)
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(settings.localized("handoff.originalLanguage"))
+                    .font(settings.scaledFont(15, weight: .semibold))
+                Picker(settings.localized("handoff.originalLanguage"),
+                       selection: $originalLanguage) {
+                    ForEach(originalLanguages, id: \.self) { language in
+                        Text(language).tag(language)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: originalLanguage) { _, _ in
+                    translateCurrentText()
                 }
             }
-            .pickerStyle(.segmented)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(settings.localized("handoff.targetLanguage"))
+                    .font(settings.scaledFont(15, weight: .semibold))
+                Picker(settings.localized("handoff.targetLanguage"),
+                       selection: $targetLanguage) {
+                    ForEach(languages, id: \.self) { language in
+                        Text(language).tag(language)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: targetLanguage) { _, _ in
+                    translateCurrentText()
+                }
+            }
         }
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(16)
+    }
+
+    /// Recipient picker — the user can tag this translated note for a
+    /// specific caregiver (so the handover log shows who it was for).
+    /// Adding caregivers themselves still happens on the Care Schedule
+    /// Board; this picker just reads from the same shared list.
+    private var caregiverAssignment: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(settings.localized("handoff.assignToCaregiver"))
+                .font(settings.scaledFont(15, weight: .semibold))
+
+            Picker(settings.localized("handoff.assignToCaregiver"),
+                   selection: $assignedCaregiverId) {
+                Text(settings.localized("handoff.noCaregiver"))
+                    .tag(UUID?.none)
+                ForEach(scheduleManager.caregivers) { caregiver in
+                    Text(caregiver.icon.isEmpty
+                         ? caregiver.name
+                         : "\(caregiver.icon)  \(caregiver.name)")
+                        .tag(Optional(caregiver.id))
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // Email & phone of the selected caregiver are intentionally
+            // not shown here — the picker label alone is enough.
+        }
+        .padding()
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(16)
     }
 
     private var messageInput: some View {
@@ -95,7 +211,7 @@ struct HandoffView: View {
     private var actionButtons: some View {
         HStack(spacing: 16) {
             Button(action: createTranslationNote) {
-                Text(settings.localized("handoff.createNote"))
+                Text(settings.localized("handoff.createTranslatedNote"))
                     .font(settings.scaledFont(16, weight: .semibold))
                     .frame(maxWidth: .infinity, minHeight: 56)
                     .padding()
@@ -124,9 +240,6 @@ struct HandoffView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text(settings.localized("handoff.preview"))
                 .font(settings.scaledFont(16, weight: .semibold))
-            Text("\(settings.localized("handoff.sourceLanguage"))\(detectedSourceLanguage)")
-                .font(settings.scaledFont(14))
-                .foregroundColor(.secondary)
 
             Group {
                 if isTranslating {
@@ -230,25 +343,92 @@ struct HandoffView: View {
         detectedSourceLanguage = TranslationService.detectSourceLanguageLabel(for: text)
         isTranslating = true
         translationError = nil
-        TranslationService.translate(text, to: targetLanguage) { result in
+        // Auto-detect was removed — always pass the explicitly picked
+        // source language to the translation service.
+        let sourceForRequest: String? = originalLanguage
+
+        // If the live-preview translation already produced a result for
+        // this exact input, reuse it instead of paying for another API
+        // round trip when the user taps "Create translated note".
+        if !translatedText.isEmpty && lastTranslatedInput == text {
+            self.isTranslating = false
+            self.persistTranslatedNote(originalText: text,
+                                       translated: translatedText)
+            return
+        }
+
+        TranslationService.translate(text,
+                                     from: sourceForRequest,
+                                     to: targetLanguage) { result in
             DispatchQueue.main.async {
                 self.isTranslating = false
                 switch result {
                 case .success(let translated):
                     self.translatedText = translated
-                    let note = HandoffNote(sender: "家庭照顧者",
-                                           recipient: self.targetLanguage,
-                                           timestamp: Date(),
-                                           originalText: text,
-                                           translatedText: translated,
-                                           isConfirmed: false)
-                    self.notes.insert(note, at: 0)
-                    self.originalText = ""
-                    self.saveNotes()
+                    self.lastTranslatedInput = text
+                    self.persistTranslatedNote(originalText: text,
+                                               translated: translated)
                 case .failure(let error):
                     self.translationError = error.localizedDescription
                 }
             }
+        }
+    }
+
+    /// Save the new note to the on-screen log, tagged with the selected
+    /// recipient caregiver (or "Unassigned" when no caregiver was picked).
+    /// The sender now reflects the actually-assigned caregiver name
+    /// instead of the previous generic "家庭照顧者" placeholder.
+    private func persistTranslatedNote(originalText: String, translated: String) {
+        let recipientLabel: String
+        let senderLabel: String
+        if let caregiver = assignedCaregiver {
+            recipientLabel = "\(caregiver.name) (\(targetLanguage))"
+            senderLabel = caregiver.name
+        } else {
+            recipientLabel = targetLanguage
+            senderLabel = settings.localized("handoff.noCaregiver")
+        }
+        let note = HandoffNote(sender: senderLabel,
+                               recipient: recipientLabel,
+                               timestamp: Date(),
+                               originalText: originalText,
+                               translatedText: translated,
+                               isConfirmed: false)
+        notes.insert(note, at: 0)
+        self.originalText = ""
+        translatedText = ""
+        lastTranslatedInput = ""
+        saveNotes()
+    }
+
+    /// Schedule a translation to run once the user stops typing for
+    /// `typingDebounceSeconds`. This is what makes live translation feel
+    /// "instant" without firing a network call on every keystroke.
+    private func scheduleDebouncedTranslate() {
+        let token = UUID()
+        typingToken = token
+        let content = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Clear the preview the moment the input is emptied so stale text
+        // doesn't linger after the user deletes everything.
+        if content.isEmpty {
+            translatedText = ""
+            lastTranslatedInput = ""
+            translationError = nil
+            return
+        }
+
+        // Skip the API call entirely if this exact input was just
+        // translated — common case when SwiftUI re-runs the onChange.
+        if content == lastTranslatedInput { return }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + typingDebounceSeconds) {
+            // Cancel ourselves if a newer keystroke superseded this one.
+            guard self.typingToken == token else { return }
+            let latest = self.originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard latest == content, !latest.isEmpty else { return }
+            self.translateCurrentText()
         }
     }
 
@@ -281,16 +461,26 @@ struct HandoffView: View {
 
     private func translateCurrentText() {
         let content = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !content.isEmpty else { return }
+        guard !content.isEmpty else {
+            translatedText = ""
+            lastTranslatedInput = ""
+            return
+        }
         detectedSourceLanguage = TranslationService.detectSourceLanguageLabel(for: content)
         isTranslating = true
         translationError = nil
-        TranslationService.translate(content, to: targetLanguage) { result in
+        // Auto-detect was removed — always pass the explicitly picked
+        // source language to the translation service.
+        let sourceForRequest: String? = originalLanguage
+        TranslationService.translate(content,
+                                     from: sourceForRequest,
+                                     to: targetLanguage) { result in
             DispatchQueue.main.async {
                 self.isTranslating = false
                 switch result {
                 case .success(let translated):
                     self.translatedText = translated
+                    self.lastTranslatedInput = content
                 case .failure(let error):
                     self.translationError = error.localizedDescription
                 }

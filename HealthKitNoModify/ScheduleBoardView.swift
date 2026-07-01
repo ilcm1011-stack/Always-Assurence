@@ -33,6 +33,8 @@ struct ScheduleBoardView: View {
     @State private var caregiverName = ""
     @State private var caregiverEmailField = ""
     @State private var caregiverPhoneField = ""
+    @State private var caregiverIconField: String = ""
+    @State private var showIconPicker: Bool = false
 
     private enum RecurrenceOption: String, CaseIterable, Identifiable {
         case none
@@ -57,6 +59,7 @@ struct ScheduleBoardView: View {
     /// list shows only the shifts for the selected calendar day; users can
     /// expand it to a week / month / year horizon, or "All".
     private enum ShiftListFilter: String, CaseIterable, Identifiable {
+        case past
         case selectedDay
         case week
         case month
@@ -66,6 +69,7 @@ struct ScheduleBoardView: View {
         var id: String { rawValue }
         var titleKey: String {
             switch self {
+            case .past:        return "schedule.filter.past"
             case .selectedDay: return "schedule.filter.selectedDay"
             case .week:        return "schedule.filter.week"
             case .month:       return "schedule.filter.month"
@@ -330,7 +334,10 @@ struct ScheduleBoardView: View {
                             Picker(settings.localized("schedule.selectCaregiver"), selection: $editSelectedCaregiverId) {
                                 Text(settings.localized("schedule.customCaregiver")).tag(UUID?.none)
                                 ForEach(scheduleManager.caregivers) { caregiver in
-                                    Text(caregiver.name).tag(Optional(caregiver.id))
+                                    Text(caregiver.icon.isEmpty
+                                         ? caregiver.name
+                                         : "\(caregiver.icon)  \(caregiver.name)")
+                                        .tag(Optional(caregiver.id))
                                 }
                             }
                             .pickerStyle(.menu)
@@ -543,7 +550,10 @@ struct ScheduleBoardView: View {
                 Picker(settings.localized("schedule.selectCaregiver"), selection: $selectedCaregiverId) {
                     Text(settings.localized("schedule.assignee.notAssigned")).tag(UUID?.none)
                     ForEach(scheduleManager.caregivers) { caregiver in
-                        Text(caregiver.name).tag(Optional(caregiver.id))
+                        Text(caregiver.icon.isEmpty
+                             ? caregiver.name
+                             : "\(caregiver.icon)  \(caregiver.name)")
+                            .tag(Optional(caregiver.id))
                     }
                 }
                 .pickerStyle(.menu)
@@ -589,6 +599,32 @@ struct ScheduleBoardView: View {
                         }
                     }
                 }
+
+                // Three editable fields directly under the caregiver drop-
+                // down so the user can type a caregiver's name, email, and
+                // phone number while creating the shift — exactly like the
+                // "Task summary" and "Notes" boxes further down. Picking a
+                // saved caregiver from the drop-down pre-fills these
+                // fields; editing them updates the shift's contact info.
+                // Subtitle labels were removed by request — the placeholder
+                // text inside each field is enough.
+                TextField(settings.localized("home.caregiverName"),
+                          text: $assignee)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+
+                TextField(settings.localized("schedule.emailPlaceholder"),
+                          text: $contactEmail)
+                    .keyboardType(.emailAddress)
+                    .textContentType(.emailAddress)
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+
+                TextField(settings.localized("schedule.phonePlaceholder"),
+                          text: $contactPhone)
+                    .keyboardType(.phonePad)
+                    .textContentType(.telephoneNumber)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
 
                 if let windows = selectedCaregiver?.availability, !windows.isEmpty {
                     Picker(settings.localized("schedule.selectCaregiverWindow"), selection: $selectedCaregiverWindowId) {
@@ -711,6 +747,12 @@ struct ScheduleBoardView: View {
         let all = scheduleManager.shifts.sorted { $0.start < $1.start }
         let cal = Calendar.current
         switch filter {
+        case .past:
+            // Show finished shifts (anything that ended before "now") so the
+            // caregiver / family can review history without scrubbing the
+            // calendar. Sorted with the most recent first.
+            let now = Date()
+            return all.filter { $0.end <= now }.reversed()
         case .selectedDay:
             return all.filter { cal.isDate($0.start, inSameDayAs: selectedDate) }
         case .week:
@@ -749,7 +791,17 @@ struct ScheduleBoardView: View {
                     .cornerRadius(12)
             }
             HStack(alignment: .top, spacing: 12) {
-                Label(shift.assignee, systemImage: "person.fill")
+                let icon = scheduleManager.caregivers
+                    .first(where: { $0.name == shift.assignee })?.icon ?? ""
+                if !icon.isEmpty {
+                    HStack(spacing: 6) {
+                        Text(icon)
+                            .font(settings.scaledFont(22))
+                        Text(shift.assignee)
+                    }
+                } else {
+                    Label(shift.assignee, systemImage: "person.fill")
+                }
                 Spacer()
                 Label(shift.taskSummary, systemImage: "list.bullet.rectangle")
             }
@@ -979,6 +1031,7 @@ struct ScheduleBoardView: View {
         caregiverName = ""
         caregiverEmailField = ""
         caregiverPhoneField = ""
+        caregiverIconField = ""
     }
 
     private func openCaregiverEditor(_ caregiver: Caregiver? = nil) {
@@ -987,6 +1040,7 @@ struct ScheduleBoardView: View {
             caregiverName = worker.name
             caregiverEmailField = worker.email
             caregiverPhoneField = worker.phone
+            caregiverIconField = worker.icon
         } else {
             resetCaregiverEditor()
         }
@@ -997,14 +1051,16 @@ struct ScheduleBoardView: View {
         guard !name.isEmpty else { return }
         let email = caregiverEmailField.trimmingCharacters(in: .whitespacesAndNewlines)
         let phone = caregiverPhoneField.trimmingCharacters(in: .whitespacesAndNewlines)
+        let icon = caregiverIconField.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if var edited = caregiverEditor {
             edited.name = name
             edited.email = email
             edited.phone = phone
+            edited.icon = icon
             scheduleManager.updateCaregiver(edited)
         } else {
-            let newCaregiver = Caregiver(name: name, email: email, phone: phone)
+            let newCaregiver = Caregiver(name: name, email: email, phone: phone, icon: icon)
             scheduleManager.addCaregiver(newCaregiver)
         }
 
@@ -1028,8 +1084,14 @@ struct ScheduleBoardView: View {
                     } else {
                         ForEach(scheduleManager.caregivers) { caregiver in
                             VStack(alignment: .leading, spacing: 6) {
-                                Text(caregiver.name)
-                                    .font(settings.scaledFont(16, weight: .semibold))
+                                HStack(spacing: 8) {
+                                    if !caregiver.icon.isEmpty {
+                                        Text(caregiver.icon)
+                                            .font(settings.scaledFont(22))
+                                    }
+                                    Text(caregiver.name)
+                                        .font(settings.scaledFont(16, weight: .semibold))
+                                }
                                 if !caregiver.email.isEmpty {
                                     Text("\(settings.localized("schedule.emailLabel"))\(caregiver.email)")
                                         .font(settings.scaledFont(13))
@@ -1058,16 +1120,79 @@ struct ScheduleBoardView: View {
                 }
 
                 Section(header: Text(caregiverEditor == nil ? settings.localized("home.addCaregiver") : settings.localized("home.edit"))) {
-                    TextField(settings.localized("home.caregiverName"), text: $caregiverName)
-                        .textFieldStyle(RoundedBorderTextFieldStyle())
-                    TextField(settings.localized("schedule.emailPlaceholder"), text: $caregiverEmailField)
-                        .keyboardType(.emailAddress)
-                        .textContentType(.emailAddress)
-                        .textFieldStyle(RoundedBorderTextFieldStyle())
-                    TextField(settings.localized("schedule.phonePlaceholder"), text: $caregiverPhoneField)
-                        .keyboardType(.phonePad)
-                        .textContentType(.telephoneNumber)
-                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                    // Three explicitly labelled fields for a new caregiver:
+                    //   1) Name
+                    //   2) Email
+                    //   3) Phone number
+                    // Each field shows its label above the input so the form
+                    // is immediately understandable even before the user
+                    // taps into the text field.
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(settings.localized("home.caregiverName"))
+                            .font(settings.scaledFont(13, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        TextField(settings.localized("home.caregiverName"), text: $caregiverName)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                    }
+                    .padding(.vertical, 4)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(settings.localized("schedule.emailPlaceholder"))
+                            .font(settings.scaledFont(13, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        TextField(settings.localized("schedule.emailPlaceholder"), text: $caregiverEmailField)
+                            .keyboardType(.emailAddress)
+                            .textContentType(.emailAddress)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                    }
+                    .padding(.vertical, 4)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(settings.localized("schedule.phonePlaceholder"))
+                            .font(settings.scaledFont(13, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        TextField(settings.localized("schedule.phonePlaceholder"), text: $caregiverPhoneField)
+                            .keyboardType(.phonePad)
+                            .textContentType(.telephoneNumber)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                    }
+                    .padding(.vertical, 4)
+
+                    // Emoji icon picker row.
+                    //
+                    // Embedding any grid / scroller / `Menu` inside a
+                    // sheet-hosted `List` row keeps losing the tap to the
+                    // list's row gesture recognizer (and triggers the
+                    // `UIContextMenuInteraction` warning). The bullet-proof
+                    // workaround is to keep this row purely informational
+                    // and open a dedicated full-screen sheet for the
+                    // actual picking — the picker grid then lives in a
+                    // plain `VStack`, free of List/Form gestures.
+                    Button(action: { showIconPicker = true }) {
+                        HStack {
+                            Text(settings.localized("schedule.caregiverIconLabel"))
+                                .font(settings.scaledFont(15, weight: .semibold))
+                                .foregroundColor(.primary)
+                            Spacer()
+                            if caregiverIconField.isEmpty {
+                                Text(settings.localized("schedule.caregiverIconNone"))
+                                    .font(settings.scaledFont(13))
+                                    .foregroundColor(.secondary)
+                            } else {
+                                Text(caregiverIconField)
+                                    .font(.system(size: 28))
+                            }
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                        .padding(.vertical, 6)
+                    }
+                    .buttonStyle(BorderlessButtonStyle())
+
                     Button(caregiverEditor == nil ? settings.localized("home.addCaregiver") : settings.localized("home.save")) {
                         saveCaregiverEntry()
                     }
@@ -1081,6 +1206,88 @@ struct ScheduleBoardView: View {
                     Button(settings.localized("schedule.close")) {
                         showCaregiverManager = false
                         resetCaregiverEditor()
+                    }
+                }
+            }
+            .sheet(isPresented: $showIconPicker) {
+                caregiverIconPickerSheet
+            }
+        }
+    }
+
+    /// Dedicated emoji-picker sheet. Lives outside the `List`/`Form` so
+    /// the tap targets work reliably across iPhone & iPad and iOS 16/17/18.
+    private var caregiverIconPickerSheet: some View {
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text(settings.localized("schedule.caregiverIconLabel"))
+                        .font(settings.scaledFont(18, weight: .semibold))
+
+                    // "No icon" row — explicit so users can clear an
+                    // existing pick without hunting for a separate button.
+                    Button(action: {
+                        caregiverIconField = ""
+                        showIconPicker = false
+                    }) {
+                        HStack {
+                            Image(systemName: "xmark.circle")
+                                .foregroundColor(.red)
+                                .font(.title2)
+                            Text(settings.localized("schedule.caregiverIconClear"))
+                                .font(settings.scaledFont(15, weight: .semibold))
+                                .foregroundColor(.primary)
+                            Spacer()
+                            if caregiverIconField.isEmpty {
+                                Image(systemName: "checkmark")
+                                    .foregroundColor(.accentColor)
+                            }
+                        }
+                        .padding(12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(Color(.tertiarySystemBackground))
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    // Emoji grid — `LazyVGrid` is fine here because we are
+                    // outside of any `List`/`Form`, so row gestures don't
+                    // interfere with our button taps.
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 5),
+                              spacing: 12) {
+                        ForEach(CaregiverIconPalette.options, id: \.self) { emoji in
+                            Button(action: {
+                                caregiverIconField = emoji
+                                showIconPicker = false
+                            }) {
+                                Text(emoji)
+                                    .font(.system(size: 36))
+                                    .frame(maxWidth: .infinity, minHeight: 64)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .fill(caregiverIconField == emoji
+                                                  ? Color(.systemBlue).opacity(0.22)
+                                                  : Color(.tertiarySystemBackground))
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .stroke(caregiverIconField == emoji ? Color(.systemBlue) : Color(.separator),
+                                                    lineWidth: caregiverIconField == emoji ? 2.5 : 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle(settings.localized("schedule.caregiverIconLabel"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(settings.localized("schedule.close")) {
+                        showIconPicker = false
                     }
                 }
             }

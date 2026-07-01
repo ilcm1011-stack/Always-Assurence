@@ -15,6 +15,25 @@ struct BloodPressureMeterView: View {
     @State private var saveMessage = ""
     @State private var showSaveAlert = false
     @State private var lastAutoBPUpload: Date? = nil
+    @State private var systolicAlerter  = VitalAlerter()
+    @State private var diastolicAlerter = VitalAlerter()
+    @State private var pulseAlerter     = VitalAlerter()
+
+    /// Status helpers — feed BLE values through the shared
+    /// `VitalRanges` so warning UI, color, and audio alerts all
+    /// agree on what "abnormal" means.
+    private var systolicStatus: VitalStatus {
+        guard let s = ble.iredDeviceData.sphygmometerData.data.systolic else { return .unknown }
+        return VitalRanges.status(Double(s), in: VitalRanges.systolicMmHg)
+    }
+    private var diastolicStatus: VitalStatus {
+        guard let d = ble.iredDeviceData.sphygmometerData.data.diastolic else { return .unknown }
+        return VitalRanges.status(Double(d), in: VitalRanges.diastolicMmHg)
+    }
+    private var pulseStatus: VitalStatus {
+        guard let p = ble.iredDeviceData.sphygmometerData.data.pulse else { return .unknown }
+        return VitalRanges.status(Double(p), in: VitalRanges.pulseBpm)
+    }
 
     var body: some View {
         VStack(spacing: 20) {
@@ -101,17 +120,23 @@ struct BloodPressureMeterView: View {
                     VStack {
                         Text(settings.localized("device.systolic"))
                             .font(settings.scaledFont(16, weight: .semibold))
-                        Text(systolicText)
-                            .font(settings.scaledFont(16))
-                            .foregroundColor(systolicWarningColor)
+                        HStack(spacing: 4) {
+                            Text(systolicText)
+                                .font(settings.scaledFont(16))
+                                .foregroundColor(systolicWarningColor)
+                            VitalWarningIcon(status: systolicStatus)
+                        }
                     }
 
                     VStack {
                         Text(settings.localized("device.diastolic"))
                             .font(settings.scaledFont(16, weight: .semibold))
-                        Text(diastolicText)
-                            .font(settings.scaledFont(16))
-                            .foregroundColor(diastolicWarningColor)
+                        HStack(spacing: 4) {
+                            Text(diastolicText)
+                                .font(settings.scaledFont(16))
+                                .foregroundColor(diastolicWarningColor)
+                            VitalWarningIcon(status: diastolicStatus)
+                        }
                     }
                 }
 
@@ -119,8 +144,12 @@ struct BloodPressureMeterView: View {
                     VStack {
                         Text(settings.localized("device.pulse"))
                             .font(settings.scaledFont(16, weight: .semibold))
-                        Text(pulseText)
-                            .font(settings.scaledFont(16))
+                        HStack(spacing: 4) {
+                            Text(pulseText)
+                                .font(settings.scaledFont(16))
+                                .foregroundColor(pulseWarningColor)
+                            VitalWarningIcon(status: pulseStatus)
+                        }
                     }
 
                     VStack {
@@ -153,6 +182,19 @@ struct BloodPressureMeterView: View {
             if completed {
                 autoSaveBloodPressureIfNeeded()
             }
+        }
+        // Independent alerters for each metric. Each only beeps on
+        // the transition into abnormal, so a single high reading
+        // produces at most one chime even though systolic, diastolic,
+        // and pulse may all update in the same BLE frame.
+        .onChange(of: ble.iredDeviceData.sphygmometerData.data.systolic) { _, _ in
+            systolicAlerter.evaluate(systolicStatus)
+        }
+        .onChange(of: ble.iredDeviceData.sphygmometerData.data.diastolic) { _, _ in
+            diastolicAlerter.evaluate(diastolicStatus)
+        }
+        .onChange(of: ble.iredDeviceData.sphygmometerData.data.pulse) { _, _ in
+            pulseAlerter.evaluate(pulseStatus)
         }
         .alert(isPresented: $showSaveAlert) {
             Alert(
@@ -313,26 +355,22 @@ struct BloodPressureMeterView: View {
     }
 
     private var systolicWarningColor: Color {
-        if let systolic = ble.iredDeviceData.sphygmometerData.data.systolic, systolic > 120 {
-            return .red
-        }
-        return .primary
+        systolicStatus.isAbnormal ? systolicStatus.tint : .primary
     }
 
     private var diastolicWarningColor: Color {
-        if let diastolic = ble.iredDeviceData.sphygmometerData.data.diastolic, diastolic > 80 {
-            return .red
-        }
-        return .primary
+        diastolicStatus.isAbnormal ? diastolicStatus.tint : .primary
+    }
+
+    private var pulseWarningColor: Color {
+        pulseStatus.isAbnormal ? pulseStatus.tint : .primary
     }
 
     private var pressureWarningColor: Color {
-        if let systolic = ble.iredDeviceData.sphygmometerData.data.systolic, systolic > 120 {
-            return .red
-        }
-        if let diastolic = ble.iredDeviceData.sphygmometerData.data.diastolic, diastolic > 80 {
-            return .red
-        }
+        // "Worst-of" so the running cuff pressure inherits warning
+        // colour as soon as either BP component is out of range.
+        if systolicStatus.isAbnormal  { return systolicStatus.tint }
+        if diastolicStatus.isAbnormal { return diastolicStatus.tint }
         return .primary
     }
 
